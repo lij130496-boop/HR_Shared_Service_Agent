@@ -6,6 +6,11 @@ from pathlib import Path
 from datetime import datetime
 import base64
 import mimetypes
+import hashlib
+import hmac
+import secrets
+import threading
+import re
 from modules.chat_history import (
     save_conversation,
     load_conversation,
@@ -33,6 +38,313 @@ FEEDBACK_LOG.touch(
 )
 
 import streamlit as st
+
+
+# ============================================================
+# 小冲AI - 用户注册 / 登录 / 多用户数据隔离
+# ============================================================
+
+USER_DB_FILE = BASE_DIR / "data" / "users.json"
+USER_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+_USER_DB_LOCK = threading.Lock()
+PASSWORD_ITERATIONS = 200_000
+
+
+def _read_users() -> dict:
+    if not USER_DB_FILE.exists():
+        return {}
+    try:
+        data = json.loads(USER_DB_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_users(users: dict) -> None:
+    USER_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = USER_DB_FILE.with_suffix(".tmp")
+    temp_file.write_text(
+        json.dumps(users, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    temp_file.replace(USER_DB_FILE)
+
+
+def _normalize_username(username: str) -> str:
+    return (username or "").strip().lower()
+
+
+def _valid_username(username: str) -> bool:
+    username = (username or "").strip()
+    return bool(
+        re.fullmatch(
+            r"[A-Za-z0-9_\-\u4e00-\u9fff]{2,30}",
+            username
+        )
+    )
+
+
+def _hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PASSWORD_ITERATIONS
+    )
+    return salt.hex(), password_hash.hex()
+
+
+def register_account(username: str, password: str, confirm_password: str) -> tuple[bool, str]:
+    username_raw = (username or "").strip()
+    username_key = _normalize_username(username_raw)
+
+    if not _valid_username(username_raw):
+        return False, "账号只能包含中文、字母、数字、下划线或横杠，长度为2~30个字符。"
+    if len(password or "") < 6:
+        return False, "密码至少需要6位。"
+    if password != confirm_password:
+        return False, "两次输入的密码不一致。"
+
+    with _USER_DB_LOCK:
+        users = _read_users()
+        if username_key in users:
+            return False, "该账号已经注册，请直接登录。"
+
+        salt_hex, password_hash = _hash_password(password)
+        users[username_key] = {
+            "username": username_raw,
+            "password_salt": salt_hex,
+            "password_hash": password_hash,
+            "role": "普通员工",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        _write_users(users)
+
+    return True, "注册成功，请使用新账号登录。"
+
+
+def authenticate_account(username: str, password: str) -> tuple[bool, dict | None]:
+    username_key = _normalize_username(username)
+    users = _read_users()
+    user = users.get(username_key)
+    if not user:
+        return False, None
+
+    # HR后台禁用的账号不能登录
+    if user.get("disabled", False):
+        return False, None
+
+    salt_hex = user.get("password_salt", "")
+    saved_hash = user.get("password_hash", "")
+    if not salt_hex or not saved_hash:
+        return False, None
+
+    try:
+        _, current_hash = _hash_password(password, salt_hex)
+    except Exception:
+        return False, None
+
+    if not hmac.compare_digest(current_hash, saved_hash):
+        return False, None
+
+    return True, user
+
+
+def _current_account() -> str:
+    return st.session_state.get("auth_username", "") or ""
+
+
+def _account_prefix(username: str | None = None) -> str:
+    username = username or _current_account()
+    normalized = _normalize_username(username)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
+    return f"u_{digest}__"
+
+
+# 保存聊天历史模块中的原始函数，然后在 app.py 内做账号隔离
+_raw_save_conversation = save_conversation
+_raw_load_conversation = load_conversation
+_raw_list_conversations = list_conversations
+
+
+def save_conversation(messages: list[dict], chat_id: str | None = None):
+    username = _current_account()
+    if not username:
+        return chat_id
+
+    has_user_message = any(item.get("role") == "user" for item in (messages or []))
+    if not has_user_message:
+        return chat_id
+
+    prefix = _account_prefix(username)
+    if chat_id and not str(chat_id).startswith(prefix):
+        chat_id = None
+
+    if not chat_id:
+        chat_id = prefix + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+    return _raw_save_conversation(messages, chat_id)
+
+
+def load_conversation(chat_id: str):
+    if not chat_id:
+        return None
+    if not str(chat_id).startswith(_account_prefix()):
+        return None
+    return _raw_load_conversation(chat_id)
+
+
+def list_conversations(search_text: str = "", limit: int = 30):
+    prefix = _account_prefix()
+    records = _raw_list_conversations(search_text="", limit=5000)
+    records = [
+        item for item in records
+        if str(item.get("id", "")).startswith(prefix)
+    ]
+
+    search_text = (search_text or "").strip().lower()
+    if search_text:
+        records = [
+            item for item in records
+            if search_text in str(item.get("title", "")).lower()
+        ]
+
+    return records[:limit]
+
+
+def _reset_user_workspace():
+    st.session_state["current_chat_id"] = None
+    st.session_state["messages_employee"] = [
+        {
+            "role": "assistant",
+            "content": (
+                "你好，我是小冲AI助手 👋\n\n"
+                "你可以问我公司制度问题，也可以上传图片、PDF、Word等资料让我分析。"
+            )
+        }
+    ]
+    st.session_state["messages_hr"] = [
+        {
+            "role": "assistant",
+            "content": "你好，这里是HR管理端，可以查看制度信息、知识库状态和员工反馈。"
+        }
+    ]
+    st.session_state["office_intent"] = None
+    st.session_state["agent_state"] = {
+        "current_intent": None,
+        "slots": {},
+        "waiting_for": []
+    }
+    st.session_state["pending_employee_question"] = None
+    st.session_state["pending_hr_question"] = None
+    st.session_state["role"] = "普通员工"
+    st.session_state["hr_authenticated"] = False
+
+
+def render_login_page() -> bool:
+    if st.session_state.get("auth_logged_in", False):
+        return True
+
+    st.markdown(
+        """
+        <div style="max-width:560px;margin:50px auto 20px auto;text-align:center;">
+            <div style="font-size:44px;font-weight:800;color:#111827;">🤖 小冲AI</div>
+            <div style="margin-top:8px;font-size:16px;color:#6b7280;">企业智能办公助手</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    left, center, right = st.columns([1, 1.35, 1])
+    with center:
+        login_tab, register_tab = st.tabs(["登录", "注册账号"])
+
+        with login_tab:
+            login_username = st.text_input(
+                "账号",
+                key="auth_login_username",
+                placeholder="请输入账号"
+            )
+            login_password = st.text_input(
+                "密码",
+                type="password",
+                key="auth_login_password",
+                placeholder="请输入密码"
+            )
+
+            if st.button(
+                "登录小冲AI",
+                type="primary",
+                width="stretch",
+                key="auth_login_button"
+            ):
+                ok, user = authenticate_account(login_username, login_password)
+                if ok and user:
+                    st.session_state["auth_logged_in"] = True
+                    st.session_state["auth_username"] = _normalize_username(login_username)
+                    st.session_state["auth_display_name"] = user.get("username") or login_username.strip()
+                    _reset_user_workspace()
+                    st.rerun()
+                else:
+                    st.error("账号或密码错误。")
+
+        with register_tab:
+            register_username = st.text_input(
+                "创建账号",
+                key="auth_register_username",
+                placeholder="例如：zhangsan 或 张三"
+            )
+            register_password = st.text_input(
+                "设置密码",
+                type="password",
+                key="auth_register_password",
+                placeholder="至少6位"
+            )
+            register_confirm = st.text_input(
+                "确认密码",
+                type="password",
+                key="auth_register_confirm",
+                placeholder="再次输入密码"
+            )
+
+            if st.button(
+                "立即注册",
+                type="primary",
+                width="stretch",
+                key="auth_register_button"
+            ):
+                ok, message = register_account(
+                    register_username,
+                    register_password,
+                    register_confirm
+                )
+                if ok:
+                    st.success(message)
+                    st.info("注册完成后，请切换到“登录”页登录。")
+                else:
+                    st.warning(message)
+
+        st.caption("普通用户注册后默认进入员工端；HR管理端仍需要管理员密码验证。")
+
+    return False
+
+
+def logout_current_account():
+    try:
+        save_conversation(
+            st.session_state.get("messages_employee", []),
+            st.session_state.get("current_chat_id")
+        )
+    except Exception as e:
+        print("退出前保存会话失败：", e)
+
+    st.session_state["auth_logged_in"] = False
+    st.session_state["auth_username"] = ""
+    st.session_state["auth_display_name"] = ""
+    _reset_user_workspace()
+
 
 from config import settings
 from rag.embeddings import EmbeddingClient
@@ -269,6 +581,35 @@ hr {
 .stTabs [data-baseweb="tab-list"] {
     justify-content: center !important;
 }
+
+/* =========================================================
+   修复侧边栏 Primary 按钮文字颜色
+   ========================================================= */
+section[data-testid="stSidebar"] .stButton > button[kind="primary"],
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] *,
+section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"],
+section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] * {
+    color: #ffffff !important;
+}
+
+/* 登录/注册区域输入框更清晰 */
+section[data-testid="stSidebar"] input {
+    color: #111827 !important;
+    background: #ffffff !important;
+}
+
+/* 登录/注册 Expander */
+section[data-testid="stSidebar"] [data-testid="stExpander"] {
+    background: #ffffff !important;
+    border: 1px solid #d9dde5 !important;
+    border-radius: 12px !important;
+}
+
+/* 错误和提示区域文字保持可读 */
+section[data-testid="stSidebar"] [data-testid="stAlert"] * {
+    color: inherit !important;
+}
+
 </style>
 """
 
@@ -343,7 +684,8 @@ def save_feedback(question, answer, status):
         ),
         "question": question,
         "answer": answer,
-        "status": status
+        "status": status,
+        "username": st.session_state.get("auth_username", "")
     }
 
     with open(
@@ -415,7 +757,8 @@ def save_ai_question_record(question, answer, sources=None):
         "question": question,
         "answer": answer,
         "status": status,
-        "source_count": len(sources or [])
+        "source_count": len(sources or []),
+        "username": st.session_state.get("auth_username", "")
     }
 
     with open(AI_QUESTION_LOG, "a", encoding="utf-8") as f:
@@ -731,6 +1074,9 @@ def get_chunk_count(store) -> int:
 
 
 def init_session():
+    st.session_state.setdefault("auth_logged_in", False)
+    st.session_state.setdefault("auth_username", "")
+    st.session_state.setdefault("auth_display_name", "")
     st.session_state.setdefault("role", "普通员工")
     st.session_state.setdefault("hr_authenticated", False)
     st.session_state.setdefault("pending_employee_question", None)
@@ -1336,7 +1682,7 @@ def render_chat(
     # 4. ChatGPT 风格聊天输入框
     # ============================================================
     prompt = st.chat_input(
-        "发消息或按 + 添加文件/图片……",
+        "发消息，或按 + 添加文件/图片",
         key=input_key,
         accept_file="multiple",
         file_type=[
@@ -2445,6 +2791,7 @@ def render_onboarding():
         basic = data.get("basic", {})
         if not st.session_state.onboarding_saved:
             record = {
+                "account": st.session_state.get("auth_username", ""),
                 "name": basic.get("name", ""),
                 "department": basic.get("department", ""),
                 "position": basic.get("position", ""),
@@ -2824,6 +3171,628 @@ footer{
         unsafe_allow_html=True
     )
 
+
+# ============================================================
+# HR后台 - 注册用户管理
+# ============================================================
+
+def render_user_admin():
+
+    st.markdown("## 👥 注册用户管理")
+
+    st.caption(
+        "查看小冲AI注册账号，并进行启用、禁用、密码重置和删除。"
+    )
+
+    users = _read_users()
+
+    if not users:
+
+        st.info(
+            "当前还没有注册用户。"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # 简单统计
+    # --------------------------------------------------------
+
+    total_users = len(users)
+
+    disabled_users = sum(
+        1
+        for user in users.values()
+        if user.get("disabled", False)
+    )
+
+    normal_users = (
+        total_users
+        - disabled_users
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.metric(
+            "注册用户",
+            total_users
+        )
+
+    with c2:
+        st.metric(
+            "正常账号",
+            normal_users
+        )
+
+    with c3:
+        st.metric(
+            "已禁用",
+            disabled_users
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # 用户列表
+    # --------------------------------------------------------
+
+    for username_key, user in sorted(
+        users.items(),
+        key=lambda item: (
+            item[1].get(
+                "created_at",
+                ""
+            )
+        ),
+        reverse=True
+    ):
+
+        display_name = (
+            user.get("username")
+            or username_key
+        )
+
+        created_at = user.get(
+            "created_at",
+            "-"
+        )
+
+        role = user.get(
+            "role",
+            "普通员工"
+        )
+
+        disabled = bool(
+            user.get(
+                "disabled",
+                False
+            )
+        )
+
+        with st.container(
+            border=True
+        ):
+
+            top1, top2, top3 = st.columns(
+                [2.2, 1.5, 1.3]
+            )
+
+            with top1:
+
+                st.markdown(
+                    f"### 👤 {display_name}"
+                )
+
+                st.caption(
+                    f"账号ID：{username_key}"
+                )
+
+            with top2:
+
+                st.write(
+                    f"**注册时间：** {created_at}"
+                )
+
+                st.write(
+                    f"**角色：** {role}"
+                )
+
+            with top3:
+
+                if disabled:
+
+                    st.error(
+                        "已禁用"
+                    )
+
+                else:
+
+                    st.success(
+                        "正常"
+                    )
+
+            # =================================================
+            # 账号启用 / 禁用
+            # =================================================
+
+            col1, col2 = st.columns(
+                [1, 2]
+            )
+
+            with col1:
+
+                if disabled:
+
+                    if st.button(
+                        "✅ 启用账号",
+                        key=f"enable_user_{username_key}",
+                        width="stretch"
+                    ):
+
+                        users[
+                            username_key
+                        ][
+                            "disabled"
+                        ] = False
+
+                        _write_users(
+                            users
+                        )
+
+                        st.success(
+                            f"{display_name} 已启用。"
+                        )
+
+                        st.rerun()
+
+                else:
+
+                    if st.button(
+                        "⛔ 禁用账号",
+                        key=f"disable_user_{username_key}",
+                        width="stretch"
+                    ):
+
+                        users[
+                            username_key
+                        ][
+                            "disabled"
+                        ] = True
+
+                        _write_users(
+                            users
+                        )
+
+                        st.success(
+                            f"{display_name} 已禁用。"
+                        )
+
+                        st.rerun()
+
+            # =================================================
+            # 密码重置
+            # =================================================
+
+            with col2:
+
+                with st.expander(
+                    "🔑 重置密码"
+                ):
+
+                    new_password = st.text_input(
+                        "新密码",
+                        type="password",
+                        key=f"new_password_{username_key}",
+                        placeholder="至少6位"
+                    )
+
+                    confirm_password = st.text_input(
+                        "确认新密码",
+                        type="password",
+                        key=f"confirm_password_{username_key}",
+                        placeholder="再次输入新密码"
+                    )
+
+                    if st.button(
+                        "确认重置密码",
+                        key=f"reset_password_{username_key}",
+                        width="stretch"
+                    ):
+
+                        if len(
+                            new_password
+                        ) < 6:
+
+                            st.warning(
+                                "新密码至少需要6位。"
+                            )
+
+                        elif (
+                            new_password
+                            != confirm_password
+                        ):
+
+                            st.warning(
+                                "两次输入的密码不一致。"
+                            )
+
+                        else:
+
+                            salt_hex, password_hash = (
+                                _hash_password(
+                                    new_password
+                                )
+                            )
+
+                            users[
+                                username_key
+                            ][
+                                "password_salt"
+                            ] = salt_hex
+
+                            users[
+                                username_key
+                            ][
+                                "password_hash"
+                            ] = password_hash
+
+                            _write_users(
+                                users
+                            )
+
+                            st.success(
+                                f"{display_name} 的密码已经重置。"
+                            )
+
+            # =================================================
+            # 删除账号
+            # =================================================
+
+            with st.expander(
+                "🗑️ 删除账号"
+            ):
+
+                st.warning(
+                    "删除后该账号将不能再登录。历史会话文件不会自动删除。"
+                )
+
+                confirm_delete = st.checkbox(
+                    f"我确认删除账号：{display_name}",
+                    key=f"confirm_delete_{username_key}"
+                )
+
+                if st.button(
+                    "永久删除账号",
+                    key=f"delete_user_{username_key}",
+                    type="primary",
+                    width="stretch",
+                    disabled=not confirm_delete
+                ):
+
+                    users.pop(
+                        username_key,
+                        None
+                    )
+
+                    _write_users(
+                        users
+                    )
+
+                    st.success(
+                        f"{display_name} 已删除。"
+                    )
+
+                    st.rerun()
+
+
+
+
+def inject_mobile_style():
+    """
+    小冲AI移动端适配
+    重点优化：
+    1. 手机标题不过度换行
+    2. 页面左右留白更合理
+    3. Tab 更紧凑
+    4. 聊天气泡更舒服
+    5. 输入框固定在底部
+    6. 侧边栏在手机上更好用
+    """
+
+    st.markdown(
+        """
+<style>
+
+/* =========================================================
+   通用微调
+   ========================================================= */
+
+html, body {
+    -webkit-text-size-adjust: 100%;
+}
+
+[data-testid="stAppViewContainer"] {
+    background: #f7f8fa !important;
+}
+
+/* 页面内容不要太宽 */
+[data-testid="stAppViewContainer"] .main .block-container {
+    max-width: 980px !important;
+}
+
+/* 聊天消息整体 */
+div[data-testid="stChatMessage"] {
+    background: #ffffff !important;
+    border: 1px solid #edf0f3 !important;
+    border-radius: 18px !important;
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.035) !important;
+}
+
+/* Tab 更简洁 */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px !important;
+    border-bottom: 1px solid #e5e7eb !important;
+}
+
+.stTabs [data-baseweb="tab"] {
+    height: 44px !important;
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    font-size: 15px !important;
+}
+
+/* 输入框 */
+[data-testid="stChatInput"] {
+    border-radius: 22px !important;
+    border: 1px solid #d7dce3 !important;
+    background: #ffffff !important;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08) !important;
+}
+
+/* =========================================================
+   手机端
+   ========================================================= */
+
+@media (max-width: 768px) {
+
+    /* 页面主体 */
+    [data-testid="stAppViewContainer"] .main .block-container {
+        max-width: 100% !important;
+
+        padding-top: 10px !important;
+        padding-left: 14px !important;
+        padding-right: 14px !important;
+
+        /* 给底部固定输入框留空间 */
+        padding-bottom: 125px !important;
+    }
+
+    /* Streamlit 顶部栏不要占太多 */
+    [data-testid="stHeader"] {
+        height: 48px !important;
+        background: rgba(247, 248, 250, 0.96) !important;
+        backdrop-filter: blur(10px);
+    }
+
+    /* 主标题：手机上不要夸张 */
+    .xiaochong-main-title {
+        font-size: 29px !important;
+        line-height: 1.28 !important;
+        letter-spacing: -0.8px !important;
+        margin-top: 6px !important;
+        margin-bottom: 18px !important;
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+        white-space: normal !important;
+    }
+
+    /* Tabs 占满宽度，两栏平均 */
+    .stTabs [data-baseweb="tab-list"] {
+        width: 100% !important;
+        justify-content: stretch !important;
+        gap: 0 !important;
+        margin-bottom: 12px !important;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        flex: 1 1 50% !important;
+        justify-content: center !important;
+        min-width: 0 !important;
+        padding: 0 6px !important;
+        font-size: 15px !important;
+        white-space: nowrap !important;
+    }
+
+    /* 聊天消息 */
+    div[data-testid="stChatMessage"] {
+        width: 100% !important;
+        max-width: 100% !important;
+
+        border-radius: 16px !important;
+
+        margin-top: 8px !important;
+        margin-bottom: 10px !important;
+
+        padding: 10px 12px !important;
+
+        box-shadow: none !important;
+    }
+
+    /* 聊天正文文字 */
+    [data-testid="stChatMessageContent"] {
+        max-width: 100% !important;
+        font-size: 16px !important;
+        line-height: 1.72 !important;
+    }
+
+    [data-testid="stChatMessageContent"] p {
+        margin-top: 4px !important;
+        margin-bottom: 9px !important;
+    }
+
+    /* 头像区域紧凑一点 */
+    [data-testid="stChatMessageAvatarUser"],
+    [data-testid="stChatMessageAvatarAssistant"] {
+        transform: scale(0.9);
+    }
+
+    /* =====================================================
+       底部输入框固定
+       ===================================================== */
+
+    [data-testid="stBottom"] {
+        position: fixed !important;
+
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+
+        z-index: 999 !important;
+
+        padding:
+            10px 14px
+            calc(10px + env(safe-area-inset-bottom))
+            14px !important;
+
+        background:
+            linear-gradient(
+                180deg,
+                rgba(247,248,250,0) 0%,
+                rgba(247,248,250,0.96) 26%,
+                rgba(247,248,250,1) 100%
+            ) !important;
+    }
+
+    [data-testid="stBottom"] > div {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+
+    [data-testid="stChatInput"] {
+        width: 100% !important;
+        max-width: 100% !important;
+
+        margin-left: auto !important;
+        margin-right: auto !important;
+
+        border-radius: 24px !important;
+
+        background: #ffffff !important;
+
+        box-shadow:
+            0 8px 26px rgba(15, 23, 42, 0.10)
+            !important;
+    }
+
+    /* 输入框文字 */
+    [data-testid="stChatInput"] textarea {
+        font-size: 16px !important;
+        line-height: 1.45 !important;
+    }
+
+    /* =====================================================
+       手机侧边栏
+       ===================================================== */
+
+    section[data-testid="stSidebar"] {
+        width: min(88vw, 340px) !important;
+        min-width: min(88vw, 340px) !important;
+        max-width: min(88vw, 340px) !important;
+
+        background: #ffffff !important;
+    }
+
+    section[data-testid="stSidebar"] > div {
+        padding: 14px 14px 26px 14px !important;
+    }
+
+    section[data-testid="stSidebar"] .ai-logo {
+        font-size: 27px !important;
+        margin-bottom: 2px !important;
+    }
+
+    section[data-testid="stSidebar"] .ai-subtitle {
+        font-size: 13px !important;
+        margin-bottom: 14px !important;
+    }
+
+    /* 侧栏按钮不要太高 */
+    section[data-testid="stSidebar"] .stButton > button {
+        min-height: 42px !important;
+        border-radius: 12px !important;
+    }
+
+    /* 侧栏文字输入框 */
+    section[data-testid="stSidebar"] input {
+        font-size: 16px !important;
+    }
+
+    /* Expander 紧凑 */
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {
+        border-radius: 12px !important;
+    }
+
+    /* =====================================================
+       表单 / 文件 / 按钮
+       ===================================================== */
+
+    .stButton > button,
+    .stDownloadButton > button {
+        min-height: 42px !important;
+        font-size: 15px !important;
+    }
+
+    [data-testid="stFileUploader"] {
+        border-radius: 14px !important;
+    }
+
+    /* metric 手机端不要太拥挤 */
+    [data-testid="stMetric"] {
+        padding: 8px !important;
+    }
+
+    /* 减少分割线间距 */
+    hr {
+        margin-top: 12px !important;
+        margin-bottom: 12px !important;
+    }
+
+    /* 隐藏底部默认 footer */
+    footer {
+        visibility: hidden !important;
+        height: 0 !important;
+    }
+}
+
+
+/* =========================================================
+   超小屏幕
+   ========================================================= */
+
+@media (max-width: 390px) {
+
+    .xiaochong-main-title {
+        font-size: 27px !important;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        font-size: 14px !important;
+    }
+
+    [data-testid="stChatMessageContent"] {
+        font-size: 15px !important;
+    }
+
+}
+
+</style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+
 def sidebar(kb_files: list[str], store):
 
     with st.sidebar:
@@ -2845,7 +3814,214 @@ def sidebar(kb_files: list[str], store):
         )
 
         # =====================================================
-        # 2. 使用身份
+        # 2. 登录状态
+        # 登录后才保存个人历史会话
+        # =====================================================
+        is_logged_in = st.session_state.get(
+            "auth_logged_in",
+            False
+        )
+
+        if is_logged_in:
+
+            display_name = (
+                st.session_state.get(
+                    "auth_display_name"
+                )
+                or st.session_state.get(
+                    "auth_username"
+                )
+                or "用户"
+            )
+
+            st.success(
+                f"👤 已登录：{display_name}"
+            )
+
+            if st.button(
+                "退出登录",
+                width="stretch",
+                key="account_logout"
+            ):
+
+                logout_current_account()
+                st.rerun()
+
+        else:
+
+            st.caption(
+                "👤 当前：游客模式"
+            )
+
+            st.caption(
+                "不登录也可以直接使用小冲AI；登录后可保存自己的历史会话。"
+            )
+
+            with st.expander(
+                "🔐 登录 / 注册账号",
+                expanded=False
+            ):
+
+                login_tab, register_tab = st.tabs(
+                    [
+                        "登录",
+                        "注册"
+                    ]
+                )
+
+                # ---------------------------------------------
+                # 登录
+                # ---------------------------------------------
+                with login_tab:
+
+                    login_username = st.text_input(
+                        "账号",
+                        key="sidebar_login_username",
+                        placeholder="请输入账号"
+                    )
+
+                    login_password = st.text_input(
+                        "密码",
+                        type="password",
+                        key="sidebar_login_password",
+                        placeholder="请输入密码"
+                    )
+
+                    if st.button(
+                        "登录",
+                        type="primary",
+                        width="stretch",
+                        key="sidebar_login_button"
+                    ):
+
+                        if not login_username.strip():
+
+                            st.warning(
+                                "请输入账号。"
+                            )
+
+                        elif not login_password:
+
+                            st.warning(
+                                "请输入密码。"
+                            )
+
+                        else:
+
+                            ok, user = authenticate_account(
+                                login_username,
+                                login_password
+                            )
+
+                            if ok and user:
+
+                                st.session_state[
+                                    "auth_logged_in"
+                                ] = True
+
+                                st.session_state[
+                                    "auth_username"
+                                ] = _normalize_username(
+                                    login_username
+                                )
+
+                                st.session_state[
+                                    "auth_display_name"
+                                ] = (
+                                    user.get("username")
+                                    or login_username.strip()
+                                )
+
+                                # 登录时清理游客临时会话，
+                                # 防止游客内容混入用户账号
+                                _reset_user_workspace()
+
+                                st.rerun()
+
+                            else:
+
+                                st.error(
+                                    "账号不存在、密码错误，或该账号已被管理员禁用。"
+                                )
+
+                # ---------------------------------------------
+                # 注册
+                # ---------------------------------------------
+                with register_tab:
+
+                    register_username = st.text_input(
+                        "创建账号",
+                        key="sidebar_register_username",
+                        placeholder="例如：zhangsan 或 张三"
+                    )
+
+                    register_password = st.text_input(
+                        "设置密码",
+                        type="password",
+                        key="sidebar_register_password",
+                        placeholder="至少6位"
+                    )
+
+                    register_confirm = st.text_input(
+                        "确认密码",
+                        type="password",
+                        key="sidebar_register_confirm",
+                        placeholder="再次输入密码"
+                    )
+
+                    if st.button(
+                        "注册账号",
+                        type="primary",
+                        width="stretch",
+                        key="sidebar_register_button"
+                    ):
+
+                        if not register_username.strip():
+
+                            st.warning(
+                                "请先输入要注册的账号。"
+                            )
+
+                            ok = False
+                            message = ""
+
+                        elif not register_password:
+
+                            st.warning(
+                                "请先设置密码。"
+                            )
+
+                            ok = False
+                            message = ""
+
+                        else:
+
+                            ok, message = register_account(
+                                register_username,
+                                register_password,
+                                register_confirm
+                            )
+
+                        if ok:
+
+                            st.success(
+                                message
+                            )
+
+                            st.caption(
+                                "注册完成后切换到“登录”页即可登录。"
+                            )
+
+                        elif message:
+
+                            st.warning(
+                                message
+                            )
+
+        st.divider()
+
+        # =====================================================
+        # 3. 使用身份
         # =====================================================
         st.markdown(
             "### 👤 使用身份"
@@ -2872,7 +4048,8 @@ def sidebar(kb_files: list[str], store):
             st.rerun()
 
         # =====================================================
-        # 3. HR管理员登录
+        # 4. HR管理员验证
+        # HR管理端仍需要管理员密码
         # =====================================================
         if st.session_state.role == "HR管理员":
 
@@ -2908,11 +4085,11 @@ def sidebar(kb_files: list[str], store):
             else:
 
                 st.success(
-                    "✓ HR管理员已登录"
+                    "✓ HR管理员已验证"
                 )
 
                 if st.button(
-                    "退出管理端",
+                    "退出HR管理端",
                     width="stretch",
                     key="hr_logout"
                 ):
@@ -2930,7 +4107,7 @@ def sidebar(kb_files: list[str], store):
         st.divider()
 
         # =====================================================
-        # 4. 新建会话
+        # 5. 新建会话
         # =====================================================
         if st.button(
             "＋ 新建会话",
@@ -2938,9 +4115,16 @@ def sidebar(kb_files: list[str], store):
             key="new_chat"
         ):
 
+            # 登录用户先保存当前会话
             try:
 
-                if st.session_state.role == "普通员工":
+                if (
+                    st.session_state.role == "普通员工"
+                    and st.session_state.get(
+                        "auth_logged_in",
+                        False
+                    )
+                ):
 
                     save_conversation(
                         st.session_state.get(
@@ -3004,102 +4188,109 @@ def sidebar(kb_files: list[str], store):
             st.rerun()
 
         # =====================================================
-        # 5. 普通员工历史会话
+        # 6. 历史会话
+        # 游客模式不做持久化，登录后显示个人历史
         # =====================================================
         if st.session_state.role == "普通员工":
 
             st.write("")
 
-            search_text = st.text_input(
-                "搜索历史会话",
-                placeholder="🔍 搜索历史会话",
-                label_visibility="collapsed",
-                key="chat_history_search"
-            )
-
-            st.markdown(
-                "#### 最近会话"
-            )
-
-            history_list = list_conversations(
-                search_text=search_text,
-                limit=30
-            )
-
-            # 固定高度，历史再多也不会把“身份”挤走
-            with st.container(
-                height=330,
-                border=False
+            if st.session_state.get(
+                "auth_logged_in",
+                False
             ):
 
-                if not history_list:
+                search_text = st.text_input(
+                    "搜索历史会话",
+                    placeholder="🔍 搜索历史会话",
+                    label_visibility="collapsed",
+                    key="chat_history_search"
+                )
 
-                    st.caption(
-                        "暂无历史会话"
-                    )
+                st.markdown(
+                    "#### 最近会话"
+                )
 
-                for item in history_list:
+                history_list = list_conversations(
+                    search_text=search_text,
+                    limit=30
+                )
 
-                    chat_id = item.get(
-                        "id"
-                    )
+                with st.container(
+                    height=300,
+                    border=False
+                ):
 
-                    title = item.get(
-                        "title",
-                        "新会话"
-                    )
+                    if not history_list:
 
-                    is_current = (
-                        chat_id
-                        == st.session_state.get(
-                            "current_chat_id"
+                        st.caption(
+                            "暂无历史会话"
                         )
-                    )
 
-                    button_title = (
-                        f"● {title}"
-                        if is_current
-                        else title
-                    )
+                    for item in history_list:
 
-                    if st.button(
-                        button_title,
-                        key=f"history_{chat_id}",
-                        width="stretch"
-                    ):
+                        chat_id = item.get(
+                            "id"
+                        )
 
-                        old_messages = (
-                            load_conversation(
-                                chat_id
+                        title = item.get(
+                            "title",
+                            "新会话"
+                        )
+
+                        is_current = (
+                            chat_id
+                            == st.session_state.get(
+                                "current_chat_id"
                             )
                         )
 
-                        if old_messages is not None:
+                        button_title = (
+                            f"● {title}"
+                            if is_current
+                            else title
+                        )
 
-                            st.session_state[
-                                "messages_employee"
-                            ] = old_messages
+                        if st.button(
+                            button_title,
+                            key=f"history_{chat_id}",
+                            width="stretch"
+                        ):
 
-                            st.session_state[
-                                "current_chat_id"
-                            ] = chat_id
+                            old_messages = (
+                                load_conversation(
+                                    chat_id
+                                )
+                            )
 
-                            st.session_state[
-                                "office_intent"
-                            ] = None
+                            if old_messages is not None:
 
-                            st.session_state[
-                                "agent_state"
-                            ] = {
-                                "current_intent": None,
-                                "slots": {},
-                                "waiting_for": []
-                            }
+                                st.session_state[
+                                    "messages_employee"
+                                ] = old_messages
 
-                        st.rerun()
+                                st.session_state[
+                                    "current_chat_id"
+                                ] = chat_id
+
+                                st.session_state[
+                                    "office_intent"
+                                ] = None
+
+                                st.session_state[
+                                    "agent_state"
+                                ] = {
+                                    "current_intent": None,
+                                    "slots": {},
+                                    "waiting_for": []
+                                }
+
+                            st.rerun()
 
 init_session()
 inject_chat_style()
+inject_mobile_style()
+
 if not settings.api_key:
     st.error("未检测到 DASHSCOPE_API_KEY。请检查当前项目或父级目录中的 .env 配置。")
     st.stop()
@@ -3116,15 +4307,18 @@ if st.session_state.role == "普通员工":
 
     st.markdown(
         """
-        <div style="
-            text-align:center;
-            margin-top:10px;
-            margin-bottom:26px;
-            font-size:38px;
-            font-weight:800;
-            color:#111827;
-            letter-spacing:-1px;
-        ">
+        <div
+            class="xiaochong-main-title"
+            style="
+                text-align:center;
+                margin-top:10px;
+                margin-bottom:26px;
+                font-size:38px;
+                font-weight:800;
+                color:#111827;
+                letter-spacing:-1px;
+            "
+        >
             有什么可以帮助你呢？
         </div>
         """,
@@ -3178,8 +4372,15 @@ else:
         st.metric("新人培训完成", len(onboarding_records), "人")
 
     st.write("")
-    tab_chat, tab_kb, tab_onboarding, tab_hitl, tab_ai = st.tabs(
-        ["💬 智能问答", "📚 知识库管理", "👋 新员工培训", "🧑‍💼 人工审核", "📊 AI运营优化"]
+    tab_chat, tab_kb, tab_onboarding, tab_hitl, tab_ai, tab_users = st.tabs(
+        [
+            "💬 智能问答",
+            "📚 知识库管理",
+            "👋 新员工培训",
+            "🧑‍💼 人工审核",
+            "📊 AI运营优化",
+            "👥 用户管理"
+        ]
     )
 
     with tab_chat:
@@ -3272,6 +4473,9 @@ else:
     with tab_ai:
         render_ai_operation_center()
         feedbacks = load_feedback()
+
+    with tab_users:
+        render_user_admin()
 
 def load_feedback():
 
