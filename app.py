@@ -4177,6 +4177,7 @@ def desktop_sidebar(kb_files: list[str], store):
 
         # =====================================================
         # 2. 登录状态
+        # 不登录也可以直接使用小冲AI
         # 登录后才保存个人历史会话
         # =====================================================
         is_logged_in = st.session_state.get(
@@ -4216,7 +4217,7 @@ def desktop_sidebar(kb_files: list[str], store):
             )
 
             st.caption(
-                "不登录也可以直接使用小冲AI；登录后可保存自己的历史会话。"
+                "登录后可保存自己的历史会话。"
             )
 
             with st.expander(
@@ -4649,7 +4650,9 @@ def desktop_sidebar(kb_files: list[str], store):
 
                             st.rerun()
 
-            else:
+
+
+
 def mobile_sidebar(kb_files: list[str], store):
     """
     手机端抽屉菜单：
