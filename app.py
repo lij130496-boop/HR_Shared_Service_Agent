@@ -3843,7 +3843,319 @@ footer {
 
 
 
-def sidebar(kb_files: list[str], store):
+
+# ============================================================
+# PC / 手机设备识别
+# 同一个网址，自动切换两套界面
+# ============================================================
+
+def is_mobile_device() -> bool:
+    """
+    根据浏览器 User-Agent 判断是否为手机/平板。
+    也支持 URL 参数：
+        ?view=mobile
+        ?view=desktop
+    用于手动测试两套界面。
+    """
+
+    # 手动覆盖，方便开发时测试
+    try:
+        forced_view = st.query_params.get("view", "")
+    except Exception:
+        forced_view = ""
+
+    if isinstance(forced_view, list):
+        forced_view = forced_view[0] if forced_view else ""
+
+    forced_view = str(forced_view).lower().strip()
+
+    if forced_view == "mobile":
+        return True
+
+    if forced_view == "desktop":
+        return False
+
+    # 自动判断
+    try:
+        user_agent = (
+            st.context.headers.get(
+                "User-Agent",
+                ""
+            )
+            or ""
+        ).lower()
+    except Exception:
+        user_agent = ""
+
+    mobile_keywords = (
+        "android",
+        "iphone",
+        "ipod",
+        "ipad",
+        "mobile",
+        "windows phone",
+        "harmonyos",
+        "micromessenger",
+    )
+
+    return any(
+        keyword in user_agent
+        for keyword in mobile_keywords
+    )
+
+
+def inject_desktop_page_style():
+    """
+    PC端专用样式。
+    不使用手机端 fixed / overflow 规则，
+    避免不同桌面浏览器出现空白或布局错乱。
+    """
+
+    st.markdown(
+        """
+<style>
+
+/* =========================================================
+   PC端 - 小冲AI
+   ========================================================= */
+
+@media (min-width: 769px) {
+
+    [data-testid="stAppViewContainer"] .main .block-container {
+        max-width: 1080px !important;
+        padding-top: 28px !important;
+        padding-left: 34px !important;
+        padding-right: 34px !important;
+        padding-bottom: 110px !important;
+    }
+
+    .xiaochong-main-title {
+        text-align: center !important;
+        font-size: 40px !important;
+        line-height: 1.2 !important;
+        font-weight: 800 !important;
+        color: #111827 !important;
+        letter-spacing: -1px !important;
+        margin-top: 14px !important;
+        margin-bottom: 28px !important;
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        justify-content: center !important;
+        gap: 14px !important;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        font-size: 16px !important;
+        min-height: 46px !important;
+        padding-left: 18px !important;
+        padding-right: 18px !important;
+    }
+
+    div[data-testid="stChatMessage"] {
+        max-width: 920px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        border-radius: 18px !important;
+    }
+
+    [data-testid="stChatInput"] {
+        max-width: 920px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        border-radius: 22px !important;
+    }
+
+    section[data-testid="stSidebar"] {
+        width: 350px !important;
+        min-width: 350px !important;
+        max-width: 350px !important;
+    }
+
+}
+
+/* 不破坏 Streamlit 关键 DOM，只隐藏普通 footer/menu */
+#MainMenu {
+    visibility: hidden !important;
+}
+
+footer {
+    visibility: hidden !important;
+    height: 0 !important;
+}
+
+</style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def inject_mobile_page_style():
+    """
+    手机端专用样式。
+    只在手机会话中注入，不会影响电脑浏览器。
+    """
+
+    st.markdown(
+        """
+<style>
+
+/* =========================================================
+   手机端 - 小冲AI
+   ========================================================= */
+
+html, body {
+    -webkit-text-size-adjust: 100%;
+}
+
+[data-testid="stAppViewContainer"] {
+    background: #f7f8fa !important;
+}
+
+[data-testid="stAppViewContainer"] .main .block-container {
+    max-width: 100% !important;
+    padding-top: 8px !important;
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    padding-bottom: 110px !important;
+}
+
+.xiaochong-mobile-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 2px 10px 2px;
+    font-size: 17px;
+    font-weight: 750;
+    color: #111827;
+}
+
+.xiaochong-main-title {
+    text-align: center !important;
+    font-size: 29px !important;
+    line-height: 1.25 !important;
+    font-weight: 800 !important;
+    color: #111827 !important;
+    letter-spacing: -0.6px !important;
+    margin-top: 18px !important;
+    margin-bottom: 20px !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    width: 100% !important;
+    justify-content: stretch !important;
+    gap: 0 !important;
+    margin-bottom: 12px !important;
+}
+
+.stTabs [data-baseweb="tab"] {
+    flex: 1 1 50% !important;
+    justify-content: center !important;
+    min-width: 0 !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    font-size: 15px !important;
+    white-space: nowrap !important;
+}
+
+div[data-testid="stChatMessage"] {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-top: 8px !important;
+    margin-bottom: 10px !important;
+    padding: 10px 11px !important;
+    background: #ffffff !important;
+    border: 1px solid #e8ebef !important;
+    border-radius: 17px !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stChatMessageContent"] {
+    max-width: 100% !important;
+    font-size: 16px !important;
+    line-height: 1.72 !important;
+}
+
+[data-testid="stChatMessageContent"] p {
+    margin-top: 4px !important;
+    margin-bottom: 8px !important;
+}
+
+[data-testid="stChatInput"] {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    border-radius: 22px !important;
+    border: 1px solid #d7dce3 !important;
+    background: #ffffff !important;
+    box-shadow: 0 8px 24px rgba(15,23,42,0.08) !important;
+}
+
+[data-testid="stChatInput"] textarea {
+    font-size: 16px !important;
+    line-height: 1.45 !important;
+}
+
+/* 手机侧边栏 = 抽屉菜单 */
+section[data-testid="stSidebar"] {
+    width: min(88vw, 340px) !important;
+    min-width: min(88vw, 340px) !important;
+    max-width: min(88vw, 340px) !important;
+    background: #ffffff !important;
+}
+
+section[data-testid="stSidebar"] > div {
+    padding: 14px 14px 24px 14px !important;
+}
+
+section[data-testid="stSidebar"] .ai-logo {
+    font-size: 27px !important;
+    margin-bottom: 2px !important;
+}
+
+section[data-testid="stSidebar"] .ai-subtitle {
+    font-size: 13px !important;
+    margin-bottom: 12px !important;
+}
+
+section[data-testid="stSidebar"] .stButton > button {
+    min-height: 42px !important;
+    border-radius: 12px !important;
+}
+
+section[data-testid="stSidebar"] input {
+    font-size: 16px !important;
+}
+
+/* 按钮更适合触控 */
+.stButton > button,
+.stDownloadButton > button {
+    min-height: 42px !important;
+    font-size: 15px !important;
+}
+
+/* Streamlit 普通底部 footer 隐藏 */
+#MainMenu {
+    visibility: hidden !important;
+}
+
+footer {
+    visibility: hidden !important;
+    height: 0 !important;
+}
+
+/* 不再强行隐藏/修改 stBottom、stDecoration 等内部关键DOM，
+   避免不同浏览器渲染不一致 */
+
+</style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+
+def desktop_sidebar(kb_files: list[str], store):
 
     with st.sidebar:
 
@@ -4344,38 +4656,445 @@ def sidebar(kb_files: list[str], store):
                     "游客可以正常聊天、上传图片和文件。登录后可保存并查看自己的历史会话。"
                 )
 
+
+
+def mobile_sidebar(kb_files: list[str], store):
+    """
+    手机端抽屉菜单：
+    账号、身份、新建会话、历史会话都放在这里。
+    """
+
+    with st.sidebar:
+
+        st.markdown(
+            """
+            <div class="ai-logo">
+                🤖 小冲AI
+            </div>
+            <div class="ai-subtitle">
+                企业智能办公助手
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # =====================================================
+        # 账号区域
+        # =====================================================
+        is_logged_in = st.session_state.get(
+            "auth_logged_in",
+            False
+        )
+
+        if is_logged_in:
+
+            display_name = (
+                st.session_state.get(
+                    "auth_display_name"
+                )
+                or st.session_state.get(
+                    "auth_username"
+                )
+                or "用户"
+            )
+
+            st.success(
+                f"👤 {display_name}"
+            )
+
+            if st.button(
+                "退出登录",
+                width="stretch",
+                key="mobile_account_logout"
+            ):
+                logout_current_account()
+                st.rerun()
+
+        else:
+
+            st.caption(
+                "当前：游客模式"
+            )
+
+            with st.expander(
+                "🔐 登录 / 注册",
+                expanded=False
+            ):
+
+                login_tab, register_tab = st.tabs(
+                    ["登录", "注册"]
+                )
+
+                with login_tab:
+
+                    login_username = st.text_input(
+                        "账号",
+                        key="mobile_login_username",
+                        placeholder="请输入账号"
+                    )
+
+                    login_password = st.text_input(
+                        "密码",
+                        type="password",
+                        key="mobile_login_password",
+                        placeholder="请输入密码"
+                    )
+
+                    if st.button(
+                        "登录",
+                        type="primary",
+                        width="stretch",
+                        key="mobile_login_button"
+                    ):
+
+                        if not login_username.strip():
+
+                            st.warning(
+                                "请输入账号。"
+                            )
+
+                        elif not login_password:
+
+                            st.warning(
+                                "请输入密码。"
+                            )
+
+                        else:
+
+                            ok, user = authenticate_account(
+                                login_username,
+                                login_password
+                            )
+
+                            if ok and user:
+
+                                st.session_state[
+                                    "auth_logged_in"
+                                ] = True
+
+                                st.session_state[
+                                    "auth_username"
+                                ] = _normalize_username(
+                                    login_username
+                                )
+
+                                st.session_state[
+                                    "auth_display_name"
+                                ] = (
+                                    user.get("username")
+                                    or login_username.strip()
+                                )
+
+                                _reset_user_workspace()
+                                st.rerun()
+
+                            else:
+
+                                st.error(
+                                    "账号不存在、密码错误，或账号已被禁用。"
+                                )
+
+                with register_tab:
+
+                    register_username = st.text_input(
+                        "创建账号",
+                        key="mobile_register_username",
+                        placeholder="账号"
+                    )
+
+                    register_password = st.text_input(
+                        "设置密码",
+                        type="password",
+                        key="mobile_register_password",
+                        placeholder="至少6位"
+                    )
+
+                    register_confirm = st.text_input(
+                        "确认密码",
+                        type="password",
+                        key="mobile_register_confirm",
+                        placeholder="再次输入密码"
+                    )
+
+                    if st.button(
+                        "注册账号",
+                        type="primary",
+                        width="stretch",
+                        key="mobile_register_button"
+                    ):
+
+                        ok, message = register_account(
+                            register_username,
+                            register_password,
+                            register_confirm
+                        )
+
+                        if ok:
+                            st.success(message)
+                        else:
+                            st.warning(message)
+
+        st.divider()
+
+        # =====================================================
+        # 身份
+        # =====================================================
+        st.markdown("#### 使用身份")
+
+        role = st.radio(
+            "",
+            ["普通员工", "HR管理员"],
+            index=(
+                0
+                if st.session_state.role == "普通员工"
+                else 1
+            ),
+            key="mobile_role_select",
+            label_visibility="collapsed"
+        )
+
+        if role != st.session_state.role:
+            st.session_state.role = role
+            st.rerun()
+
+        if st.session_state.role == "HR管理员":
+
+            if not st.session_state.hr_authenticated:
+
+                password = st.text_input(
+                    "管理员密码",
+                    type="password",
+                    key="mobile_hr_password"
+                )
+
+                if st.button(
+                    "进入HR管理端",
+                    width="stretch",
+                    key="mobile_hr_login"
+                ):
+
+                    if password == settings.hr_password:
+
+                        st.session_state[
+                            "hr_authenticated"
+                        ] = True
+
+                        st.rerun()
+
+                    else:
+
+                        st.error("密码错误。")
+
+            else:
+
+                st.success("HR管理员已验证")
+
+        st.divider()
+
+        # =====================================================
+        # 新建会话
+        # =====================================================
+        if st.button(
+            "＋ 新建会话",
+            width="stretch",
+            key="mobile_new_chat"
+        ):
+
+            try:
+
+                if (
+                    st.session_state.role == "普通员工"
+                    and st.session_state.get(
+                        "auth_logged_in",
+                        False
+                    )
+                ):
+
+                    save_conversation(
+                        st.session_state.get(
+                            "messages_employee",
+                            []
+                        ),
+                        st.session_state.get(
+                            "current_chat_id"
+                        )
+                    )
+
+            except Exception as e:
+                print("保存当前会话失败：", e)
+
+            if st.session_state.role == "普通员工":
+
+                st.session_state[
+                    "current_chat_id"
+                ] = None
+
+                st.session_state[
+                    "messages_employee"
+                ] = [
+                    {
+                        "role": "assistant",
+                        "content":
+                            "你好，我是小冲AI助手 👋\n\n"
+                            "你可以直接问我公司制度问题，"
+                            "也可以上传图片、PDF、Word等资料让我分析。"
+                    }
+                ]
+
+                st.session_state[
+                    "office_intent"
+                ] = None
+
+                st.session_state[
+                    "agent_state"
+                ] = {
+                    "current_intent": None,
+                    "slots": {},
+                    "waiting_for": []
+                }
+
+            else:
+
+                st.session_state[
+                    "messages_hr"
+                ] = [
+                    {
+                        "role": "assistant",
+                        "content":
+                            "你好，这里是HR管理端。"
+                    }
+                ]
+
+            st.rerun()
+
+        # =====================================================
+        # 历史会话
+        # =====================================================
+        if (
+            st.session_state.role == "普通员工"
+            and st.session_state.get(
+                "auth_logged_in",
+                False
+            )
+        ):
+
+            with st.expander(
+                "🕘 历史会话",
+                expanded=False
+            ):
+
+                search_text = st.text_input(
+                    "搜索历史",
+                    placeholder="搜索历史会话",
+                    label_visibility="collapsed",
+                    key="mobile_history_search"
+                )
+
+                history_list = list_conversations(
+                    search_text=search_text,
+                    limit=20
+                )
+
+                if not history_list:
+                    st.caption("暂无历史会话")
+
+                for item in history_list:
+
+                    chat_id = item.get("id")
+                    title = item.get(
+                        "title",
+                        "新会话"
+                    )
+
+                    if st.button(
+                        title,
+                        key=f"mobile_history_{chat_id}",
+                        width="stretch"
+                    ):
+
+                        old_messages = load_conversation(
+                            chat_id
+                        )
+
+                        if old_messages is not None:
+
+                            st.session_state[
+                                "messages_employee"
+                            ] = old_messages
+
+                            st.session_state[
+                                "current_chat_id"
+                            ] = chat_id
+
+                            st.session_state[
+                                "office_intent"
+                            ] = None
+
+                            st.session_state[
+                                "agent_state"
+                            ] = {
+                                "current_intent": None,
+                                "slots": {},
+                                "waiting_for": []
+                            }
+
+                        st.rerun()
+
+
 init_session()
 inject_chat_style()
-inject_mobile_style()
+
+# ============================================================
+# 自动判断设备
+# ============================================================
+MOBILE_MODE = is_mobile_device()
+
+if MOBILE_MODE:
+    inject_mobile_page_style()
+else:
+    inject_desktop_page_style()
+
 
 if not settings.api_key:
-    st.error("未检测到 DASHSCOPE_API_KEY。请检查当前项目或父级目录中的 .env 配置。")
+    st.error(
+        "未检测到 DASHSCOPE_API_KEY。"
+        "请检查当前项目或父级目录中的 .env 配置。"
+    )
     st.stop()
+
 
 embedder, store, agent = create_services()
 kb_files = get_kb_files()
 chunk_count = get_chunk_count(store)
 hitl_records = load_hitl_records()
-onboarding_records = load_onboarding_records(settings.onboarding_log_path)
-sidebar(kb_files, store)
+onboarding_records = load_onboarding_records(
+    settings.onboarding_log_path
+)
 
 
-if st.session_state.role == "普通员工":
+# ============================================================
+# 两套侧边栏
+# ============================================================
+if MOBILE_MODE:
+    mobile_sidebar(
+        kb_files,
+        store
+    )
+else:
+    desktop_sidebar(
+        kb_files,
+        store
+    )
+
+
+# ============================================================
+# 普通员工页面
+# ============================================================
+def render_employee_desktop():
 
     st.markdown(
         """
-        <div
-            class="xiaochong-main-title"
-            style="
-                text-align:center;
-                margin-top:10px;
-                margin-bottom:26px;
-                font-size:38px;
-                font-weight:800;
-                color:#111827;
-                letter-spacing:-1px;
-            "
-        >
+        <div class="xiaochong-main-title">
             有什么可以帮助你呢？
         </div>
         """,
@@ -4392,9 +5111,13 @@ if st.session_state.role == "普通员工":
     with employee_tab_chat:
 
         if not store.exists:
-            st.warning("知识库尚未初始化，请联系 HR 管理员。")
+
+            st.warning(
+                "知识库尚未初始化，请联系 HR 管理员。"
+            )
 
         else:
+
             render_chat(
                 "messages_employee",
                 show_sources=False,
@@ -4403,33 +5126,122 @@ if st.session_state.role == "普通员工":
 
     with employee_tab_onboard:
         render_onboarding()
-else:
+
+
+def render_employee_mobile():
+
+    st.markdown(
+        """
+        <div class="xiaochong-mobile-brand">
+            <span>🤖</span>
+            <span>小冲AI</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        """
+        <div class="xiaochong-main-title">
+            有什么可以帮助你呢？
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    employee_tab_chat, employee_tab_onboard = st.tabs(
+        [
+            "💬 综合管理助手",
+            "👋 新员工培训"
+        ]
+    )
+
+    with employee_tab_chat:
+
+        if not store.exists:
+
+            st.warning(
+                "知识库尚未初始化，请联系HR管理员。"
+            )
+
+        else:
+
+            render_chat(
+                "messages_employee",
+                show_sources=False,
+                input_key="employee_chat_input_mobile"
+            )
+
+    with employee_tab_onboard:
+        render_onboarding()
+
+
+# ============================================================
+# HR 页面
+# ============================================================
+def render_hr_page():
+
     if not st.session_state.hr_authenticated:
+
         hero(
             "HR 管理中心",
-            "这里用于制度问答溯源、知识库维护与人工审核。请先在左侧完成管理员验证。",
+            "这里用于制度问答溯源、知识库维护与人工审核。"
+            "请先在左侧完成管理员验证。",
             admin=True,
         )
-        st.info("🔐 请在左侧输入 HR 管理员密码后进入管理端。")
-        st.stop()
+
+        st.info(
+            "🔐 请在左侧输入 HR 管理员密码后进入管理端。"
+        )
+
+        return
 
     hero(
         "HR 管理中心",
-        "统一查看制度问答依据、知识库状态与需要人工确认的员工问题，让智能问答结果可追溯、可管理。",
+        "统一查看制度问答依据、知识库状态与需要人工确认的员工问题。",
         admin=True,
     )
+
     c1, c2, c3, c4 = st.columns(4)
+
     with c1:
-        st.metric("知识文件", len(kb_files), "个")
+        st.metric(
+            "知识文件",
+            len(kb_files),
+            "个"
+        )
+
     with c2:
-        st.metric("知识切块", chunk_count, "条")
+        st.metric(
+            "知识切块",
+            chunk_count,
+            "条"
+        )
+
     with c3:
-        st.metric("HITL 记录", len(hitl_records), "条")
+        st.metric(
+            "HITL 记录",
+            len(hitl_records),
+            "条"
+        )
+
     with c4:
-        st.metric("新人培训完成", len(onboarding_records), "人")
+        st.metric(
+            "新人培训完成",
+            len(onboarding_records),
+            "人"
+        )
 
     st.write("")
-    tab_chat, tab_kb, tab_onboarding, tab_hitl, tab_ai, tab_users = st.tabs(
+
+    (
+        tab_chat,
+        tab_kb,
+        tab_onboarding,
+        tab_hitl,
+        tab_ai,
+        tab_users
+    ) = st.tabs(
         [
             "💬 智能问答",
             "📚 知识库管理",
@@ -4441,120 +5253,250 @@ else:
     )
 
     with tab_chat:
-        st.markdown('<div class="section-title">HR 制度问答</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-subtitle">回答下方可展开查看原始制度依据和相关度，员工端不会展示这些信息。</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            '<div class="section-title">HR 制度问答</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            '<div class="section-subtitle">'
+            '回答下方可展开查看原始制度依据和相关度，'
+            '员工端不会展示这些信息。'
+            '</div>',
+            unsafe_allow_html=True
+        )
+
         if not store.exists:
-            st.warning("尚未建立知识库索引，请先在左侧点击“重建知识库索引”。")
+
+            st.warning(
+                "尚未建立知识库索引。"
+            )
+
         else:
+
             render_chat(
                 "messages_hr",
                 show_sources=True,
-                input_key="hr_chat_input",
-             
+                input_key=(
+                    "hr_chat_input_mobile"
+                    if MOBILE_MODE
+                    else "hr_chat_input"
+                )
             )
 
     with tab_kb:
-        st.markdown('<div class="section-title">知识库管理</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-subtitle">查看当前制度文件和已建立的知识切块。新增文件后请重新建立索引。</div>', unsafe_allow_html=True)
-        fcol, scol = st.columns([1, 1.6], gap="large")
+
+        st.markdown(
+            '<div class="section-title">知识库管理</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            '<div class="section-subtitle">'
+            '查看当前制度文件和已建立的知识切块。'
+            '</div>',
+            unsafe_allow_html=True
+        )
+
+        fcol, scol = st.columns(
+            [1, 1.6],
+            gap="large"
+        )
+
         with fcol:
-            st.markdown("#### 📁 当前知识文件")
+
+            st.markdown(
+                "#### 📁 当前知识文件"
+            )
+
             if not kb_files:
-                st.info("knowledge_base 目录中暂无支持的文件。")
+
+                st.info(
+                    "knowledge_base 目录中暂无支持的文件。"
+                )
+
             else:
+
                 for name in kb_files:
-                    with st.container(border=True):
-                        st.markdown(f"📄 **{name}**")
-                        st.caption("已纳入知识库扫描范围")
+
+                    with st.container(
+                        border=True
+                    ):
+
+                        st.markdown(
+                            f"📄 **{name}**"
+                        )
+
+                        st.caption(
+                            "已纳入知识库扫描范围"
+                        )
+
         with scol:
-            st.markdown("#### 🧩 知识切块预览")
+
+            st.markdown(
+                "#### 🧩 知识切块预览"
+            )
+
             if store.exists:
+
                 try:
+
                     store.load()
+
                     for item in store.metadata[:8]:
-                        title = f"{item.get('source', '未知文件')} · {item.get('heading') or '未标注章节'}"
-                        with st.expander(title):
-                            st.caption(f"Chunk ID：{item.get('id', '-')}")
-                            st.write(item.get("text", ""))
+
+                        title = (
+                            f"{item.get('source', '未知文件')} · "
+                            f"{item.get('heading') or '未标注章节'}"
+                        )
+
+                        with st.expander(
+                            title
+                        ):
+
+                            st.caption(
+                                f"Chunk ID：{item.get('id', '-')}"
+                            )
+
+                            st.write(
+                                item.get(
+                                    "text",
+                                    ""
+                                )
+                            )
+
                 except Exception as e:
-                    st.error(f"索引读取失败：{e}")
+
+                    st.error(
+                        f"索引读取失败：{e}"
+                    )
+
             else:
-                st.info("当前还没有可预览的知识切块。")
+
+                st.info(
+                    "当前还没有可预览的知识切块。"
+                )
 
     with tab_onboarding:
-        st.markdown('<div class="section-title">新员工培训管理</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-subtitle">培训内容聚焦主要工作分析、公司办公地图和位置、考勤管理制度。</div>', unsafe_allow_html=True)
 
-        record_tab, map_tab = st.tabs(["📋 培训完成记录", "🗺️ 办公地图与位置配置"])
+        st.markdown(
+            '<div class="section-title">新员工培训管理</div>',
+            unsafe_allow_html=True
+        )
+
+        record_tab, map_tab = st.tabs(
+            [
+                "📋 培训完成记录",
+                "🗺️ 办公地图与位置配置"
+            ]
+        )
 
         with record_tab:
+
             if not onboarding_records:
-                st.info("暂时还没有新员工完成培训。")
+
+                st.info(
+                    "暂时还没有新员工完成培训。"
+                )
+
             else:
+
                 rows = []
+
                 for item in onboarding_records:
-                    rows.append({
-                        "姓名": item.get("name", "-"),
-                        "部门": item.get("department", "-"),
-                        "岗位": item.get("position", "-"),
-                        "入职日期": item.get("start_date", "-"),
-                        "工作分析": "✅" if item.get("work_analysis_completed") else "—",
-                        "办公地图": "✅" if item.get("office_map_completed") else "—",
-                        "考勤制度": "✅" if item.get("attendance_completed") else "—",
-                        "状态": item.get("status", "-"),
-                        "完成时间": item.get("submitted_at", "-"),
-                    })
-                st.dataframe(rows, width="stretch", hide_index=True)
+
+                    rows.append(
+                        {
+                            "姓名": item.get("name", "-"),
+                            "部门": item.get("department", "-"),
+                            "岗位": item.get("position", "-"),
+                            "入职日期": item.get("start_date", "-"),
+                            "工作分析":
+                                "✅"
+                                if item.get("work_analysis_completed")
+                                else "—",
+                            "办公地图":
+                                "✅"
+                                if item.get("office_map_completed")
+                                else "—",
+                            "考勤制度":
+                                "✅"
+                                if item.get("attendance_completed")
+                                else "—",
+                            "状态": item.get("status", "-"),
+                            "完成时间": item.get("submitted_at", "-"),
+                        }
+                    )
+
+                st.dataframe(
+                    rows,
+                    width="stretch",
+                    hide_index=True
+                )
 
         with map_tab:
             render_company_location_admin()
 
     with tab_hitl:
-        st.markdown('<div class="section-title">人工审核队列</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-subtitle">集中查看薪资、合同、处分等需要 HR 进一步确认的问题。</div>', unsafe_allow_html=True)
-        if not hitl_records:
-            st.success("🎉 当前没有待人工确认的记录。")
-        else:
-            for idx, item in enumerate(hitl_records, start=1):
-                with st.container(border=True):
-                    top_a, top_b = st.columns([5, 1])
-                    with top_a:
-                        st.markdown(f"**#{idx}  {item.get('question', '-')}**")
-                        st.caption(f"提交时间：{item.get('time', '-')}")
-                    with top_b:
-                        st.markdown("**待确认**")
-                    st.write(f"**触发原因：** {item.get('reason', '-')}")
-                    st.caption(f"当前状态：{item.get('status', 'pending')}")
 
+        st.markdown(
+            '<div class="section-title">人工审核队列</div>',
+            unsafe_allow_html=True
+        )
+
+        if not hitl_records:
+
+            st.success(
+                "🎉 当前没有待人工确认的记录。"
+            )
+
+        else:
+
+            for idx, item in enumerate(
+                hitl_records,
+                start=1
+            ):
+
+                with st.container(
+                    border=True
+                ):
+
+                    st.markdown(
+                        f"**#{idx}  {item.get('question', '-')}**"
+                    )
+
+                    st.caption(
+                        f"提交时间：{item.get('time', '-')}"
+                    )
+
+                    st.write(
+                        f"**触发原因：** {item.get('reason', '-')}"
+                    )
+
+                    st.caption(
+                        f"当前状态：{item.get('status', 'pending')}"
+                    )
 
     with tab_ai:
+
         render_ai_operation_center()
-        feedbacks = load_feedback()
 
     with tab_users:
+
         render_user_admin()
 
-def load_feedback():
 
-    path = Path("data/feedback.jsonl")
+# ============================================================
+# 页面路由
+# ============================================================
+if st.session_state.role == "普通员工":
 
-    if not path.exists():
-        return []
+    if MOBILE_MODE:
+        render_employee_mobile()
+    else:
+        render_employee_desktop()
 
-    rows = []
+else:
 
-    for line in path.read_text(
-        encoding="utf-8"
-    ).splitlines():
-
-        if not line.strip():
-            continue
-
-        try:
-            rows.append(
-                json.loads(line)
-            )
-        except:
-            pass
-
-    return rows
+    render_hr_page()
