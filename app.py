@@ -4177,7 +4177,6 @@ def desktop_sidebar(kb_files: list[str], store):
 
         # =====================================================
         # 2. 登录状态
-        # 不登录也可以直接使用小冲AI
         # 登录后才保存个人历史会话
         # =====================================================
         is_logged_in = st.session_state.get(
@@ -4651,13 +4650,6 @@ def desktop_sidebar(kb_files: list[str], store):
                             st.rerun()
 
             else:
-
-                st.info(
-                    "游客可以正常聊天、上传图片和文件。登录后可保存并查看自己的历史会话。"
-                )
-
-
-
 def mobile_sidebar(kb_files: list[str], store):
     """
     手机端抽屉菜单：
