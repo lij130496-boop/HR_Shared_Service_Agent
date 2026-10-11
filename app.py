@@ -3786,6 +3786,56 @@ div[data-testid="stChatMessage"] {
 
 }
 
+
+/* =====================================================
+   隐藏 Streamlit 默认底部标识
+   ===================================================== */
+
+/* Hosted with Streamlit */
+footer {
+    display: none !important;
+}
+
+
+/* 右下角 Streamlit 水印 */
+[data-testid="stDecoration"] {
+    display: none !important;
+}
+
+
+/* 状态组件 */
+[data-testid="stStatusWidget"] {
+    display: none !important;
+}
+
+
+/* Deploy 按钮 */
+.stDeployButton {
+    display: none !important;
+}
+
+
+/* Main 菜单 */
+#MainMenu {
+    display: none !important;
+}
+
+
+/* Streamlit badge */
+.viewerBadge_container__1QSob {
+    display: none !important;
+}
+
+
+/* 手机底部空间减少 */
+@media (max-width:768px){
+
+    [data-testid="stAppViewContainer"] .main .block-container {
+        padding-bottom:90px !important;
+    }
+
+}
+
 </style>
         """,
         unsafe_allow_html=True
@@ -3815,6 +3865,7 @@ def sidebar(kb_files: list[str], store):
 
         # =====================================================
         # 2. 登录状态
+        # 不登录也可以直接使用小冲AI
         # 登录后才保存个人历史会话
         # =====================================================
         is_logged_in = st.session_state.get(
@@ -4286,6 +4337,12 @@ def sidebar(kb_files: list[str], store):
                                 }
 
                             st.rerun()
+
+            else:
+
+                st.info(
+                    "游客可以正常聊天、上传图片和文件。登录后可保存并查看自己的历史会话。"
+                )
 
 init_session()
 inject_chat_style()
